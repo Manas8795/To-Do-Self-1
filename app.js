@@ -21,6 +21,7 @@ const countPending = document.getElementById("count-pending");
 const countShifted = document.getElementById("count-shifted");
 const overdueCount = document.getElementById("overdue-count");
 const overdueList = document.getElementById("overdue-list");
+const syncState = document.getElementById("sync-state");
 
 const STORAGE_KEY = "todo-app-items-v1";
 const THEME_KEY = "todo-app-theme-v1";
@@ -125,10 +126,12 @@ function bindUiEvents() {
 
 async function initSupabase() {
   if (!window.supabase?.createClient || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    setSyncState("Sync: Supabase not configured");
     return;
   }
 
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  setSyncState("Sync: connected");
   await loadTodosFromSupabase();
 
   // Lightweight pull for cross-device updates.
@@ -251,6 +254,8 @@ async function syncTodosToSupabase() {
     return;
   }
   syncInFlight = true;
+  setSyncState("Sync: writing...");
+  let hadError = false;
 
   try {
     const rows = todos.map((todo) => ({
@@ -271,6 +276,8 @@ async function syncTodosToSupabase() {
         .from("todos")
         .upsert(rows, { onConflict: "id" });
       if (error) {
+        hadError = true;
+        setSyncState(`Sync error: ${error.message}`);
         console.error("Supabase sync upsert failed:", error.message);
         return;
       }
@@ -292,6 +299,9 @@ async function syncTodosToSupabase() {
     }
   } finally {
     syncInFlight = false;
+    if (!hadError) {
+      setSyncState("Sync: up to date");
+    }
     if (syncQueued) {
       syncQueued = false;
       void syncTodosToSupabase();
@@ -301,12 +311,15 @@ async function syncTodosToSupabase() {
 
 async function loadTodosFromSupabase(overwriteLocal = true) {
   if (!supabaseClient) return;
+  if (syncInFlight) return;
+  setSyncState("Sync: loading...");
   const { data, error } = await supabaseClient
     .from("todos")
     .select("*")
     .order("created_at", { ascending: false });
 
   if (error) {
+    setSyncState(`Sync error: ${error.message}`);
     console.error("Supabase load failed:", error.message);
     return;
   }
@@ -337,6 +350,7 @@ async function loadTodosFromSupabase(overwriteLocal = true) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(todos));
   autoShiftOverdueTasks();
   render();
+  setSyncState("Sync: loaded");
 }
 
 function loadTodosLocal() {
@@ -614,6 +628,12 @@ function capitalize(text) {
 
 function isDateKey(value) {
   return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function setSyncState(text) {
+  if (syncState) {
+    syncState.textContent = text;
+  }
 }
 
 function initPwaInstall() {
