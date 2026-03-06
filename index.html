@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0f766e" />
+  <title>To-Do App</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="app">
+    <header class="app-header">
+      <div>
+        <h1>To-Do</h1>
+        <p>Plan less. Finish more.</p>
+      </div>
+      <div class="header-controls">
+        <button id="install-app" class="install-app" type="button" hidden>Install app</button>
+        <select id="theme-select" class="theme-select" aria-label="Select theme">
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+          <option value="sork">Sork</option>
+          <option value="grind">Grind</option>
+          <option value="soft">Soft</option>
+          <option value="rest">Rest</option>
+        </select>
+      </div>
+    </header>
+
+    <section class="app-layout">
+      <section class="calendar" aria-label="Task calendar">
+        <div class="calendar-head">
+          <button id="prev-month" type="button" aria-label="Previous month">Prev</button>
+          <h2 id="calendar-title"></h2>
+          <button id="next-month" type="button" aria-label="Next month">Next</button>
+        </div>
+        <div id="calendar-grid" class="calendar-grid"></div>
+        <p class="calendar-help">Click a day to view that day's tasks. Dots show days with tasks.</p>
+      </section>
+
+      <section class="tasks-panel">
+        <form id="todo-form" class="todo-form">
+          <input
+            id="todo-input"
+            type="text"
+            placeholder="Add a task..."
+            autocomplete="off"
+            maxlength="120"
+            required
+          />
+          <input id="todo-time" type="time" aria-label="Deadline time" />
+          <select id="todo-priority" aria-label="Task level">
+            <option value="low">Low</option>
+            <option value="moderate" selected>Moderate</option>
+            <option value="high">High</option>
+          </select>
+          <button type="submit">Add</button>
+        </form>
+
+        <section class="toolbar">
+          <div class="filters" role="tablist" aria-label="Task filters">
+            <button class="filter-btn active" data-filter="pending" type="button">Pending</button>
+            <button class="filter-btn" data-filter="completed" type="button">Completed</button>
+            <button class="filter-btn" data-filter="shifted" type="button">Shifted</button>
+          </div>
+          <button id="clear-completed" class="clear-btn" type="button">Clear completed</button>
+        </section>
+
+        <ul id="todo-list" class="todo-list"></ul>
+
+        <footer class="app-footer">
+          <span id="tasks-left">0 tasks left</span>
+        </footer>
+
+        <section class="performance" aria-label="Daily performance chart">
+          <div class="performance-head">
+            <h3>Performance</h3>
+            <span id="performance-date"></span>
+          </div>
+          <div class="performance-charts">
+            <div class="donut-wrap">
+              <div id="performance-donut" class="performance-donut">
+                <span id="performance-rate">0%</span>
+              </div>
+              <small>Task split</small>
+            </div>
+          </div>
+          <div class="pie-legend">
+            <div class="legend-item"><i class="dot completed"></i>Completed: <strong id="count-completed">0</strong></div>
+            <div class="legend-item"><i class="dot pending"></i>Pending: <strong id="count-pending">0</strong></div>
+            <div class="legend-item"><i class="dot shifted"></i>Shifted: <strong id="count-shifted">0</strong></div>
+          </div>
+        </section>
+
+        <section class="overdue" aria-label="Overdue tasks">
+          <div class="overdue-head">
+            <h3>Overdue</h3>
+            <span id="overdue-count">0</span>
+          </div>
+          <ul id="overdue-list" class="overdue-list"></ul>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <template id="todo-item-template">
+    <li class="todo-item">
+      <label class="todo-check-wrap">
+        <input class="todo-check" type="checkbox" />
+        <span class="check-mark"></span>
+      </label>
+      <div class="todo-content">
+        <span class="todo-text"></span>
+        <div class="todo-meta">
+          <small class="todo-priority"></small>
+          <small class="todo-time"></small>
+        </div>
+      </div>
+      <div class="todo-actions">
+        <button class="edit-btn" type="button" aria-label="Edit task">Edit</button>
+        <button class="delete-btn" type="button" aria-label="Delete task">Delete</button>
+      </div>
+    </li>
+  </template>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="app.js"></script>
+</body>
+</html>
