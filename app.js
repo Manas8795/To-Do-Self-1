@@ -326,19 +326,8 @@ async function loadTodosFromSupabase(overwriteLocal = true) {
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
   if (!overwriteLocal) {
-    // Pull mode: update only if changed count/ids.
-    const localIds = new Set(todos.map((t) => t.id));
-    const cloudIds = new Set(cloudTodos.map((t) => t.id));
-    if (localIds.size === cloudIds.size) {
-      let same = true;
-      for (const id of localIds) {
-        if (!cloudIds.has(id)) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return;
-    }
+    // Pull mode: compare full todo content, not just IDs.
+    if (areTodosEquivalent(todos, cloudTodos)) return;
   }
 
   if (cloudTodos.length === 0 && todos.length > 0) {
@@ -634,6 +623,39 @@ function setSyncState(text) {
   if (syncState) {
     syncState.textContent = text;
   }
+}
+
+function areTodosEquivalent(localTodos, remoteTodos) {
+  if (localTodos.length !== remoteTodos.length) return false;
+  const localById = buildTodoSignatureMap(localTodos);
+  const remoteById = buildTodoSignatureMap(remoteTodos);
+  if (localById.size !== remoteById.size) return false;
+
+  for (const [id, localSignature] of localById.entries()) {
+    if (remoteById.get(id) !== localSignature) return false;
+  }
+  return true;
+}
+
+function buildTodoSignatureMap(items) {
+  const map = new Map();
+  items.forEach((todo) => {
+    map.set(
+      todo.id,
+      [
+        todo.text,
+        todo.completed,
+        todo.taskDate,
+        todo.originalDate,
+        todo.shifted,
+        todo.shiftedFrom,
+        todo.priority,
+        todo.deadlineTime,
+        todo.createdAt,
+      ].join("|")
+    );
+  });
+  return map;
 }
 
 function initPwaInstall() {
