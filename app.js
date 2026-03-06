@@ -36,7 +36,6 @@ let currentFilter = "pending";
 let calendarViewDate = new Date();
 let selectedDate = todayKey;
 let supabaseClient = null;
-let pullTimer = null;
 let syncInFlight = false;
 let syncQueued = false;
 let deferredInstallPrompt = null;
@@ -133,11 +132,6 @@ async function initSupabase() {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
   setSyncState("Sync: connected");
   await loadTodosFromSupabase();
-
-  // Lightweight pull for cross-device updates.
-  pullTimer = setInterval(() => {
-    void loadTodosFromSupabase(false);
-  }, 15000);
 }
 
 function render() {
@@ -309,7 +303,7 @@ async function syncTodosToSupabase() {
   }
 }
 
-async function loadTodosFromSupabase(overwriteLocal = true) {
+async function loadTodosFromSupabase() {
   if (!supabaseClient) return;
   if (syncInFlight) return;
   setSyncState("Sync: loading...");
@@ -325,10 +319,6 @@ async function loadTodosFromSupabase(overwriteLocal = true) {
   }
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
-  if (!overwriteLocal) {
-    // Pull mode: compare full todo content, not just IDs.
-    if (areTodosEquivalent(todos, cloudTodos)) return;
-  }
 
   if (cloudTodos.length === 0 && todos.length > 0) {
     await syncTodosToSupabase();
@@ -623,39 +613,6 @@ function setSyncState(text) {
   if (syncState) {
     syncState.textContent = text;
   }
-}
-
-function areTodosEquivalent(localTodos, remoteTodos) {
-  if (localTodos.length !== remoteTodos.length) return false;
-  const localById = buildTodoSignatureMap(localTodos);
-  const remoteById = buildTodoSignatureMap(remoteTodos);
-  if (localById.size !== remoteById.size) return false;
-
-  for (const [id, localSignature] of localById.entries()) {
-    if (remoteById.get(id) !== localSignature) return false;
-  }
-  return true;
-}
-
-function buildTodoSignatureMap(items) {
-  const map = new Map();
-  items.forEach((todo) => {
-    map.set(
-      todo.id,
-      [
-        todo.text,
-        todo.completed,
-        todo.taskDate,
-        todo.originalDate,
-        todo.shifted,
-        todo.shiftedFrom,
-        todo.priority,
-        todo.deadlineTime,
-        todo.createdAt,
-      ].join("|")
-    );
-  });
-  return map;
 }
 
 function initPwaInstall() {
