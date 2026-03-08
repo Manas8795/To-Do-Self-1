@@ -893,6 +893,7 @@ function saveCurrentNote() {
 }
 
 function renderPerformance(dayTodos) {
+  const overallScopeTodos = todos.filter((todo) => todo.originalDate <= todayKey);
   const completed = dayTodos.filter((todo) => todo.completed).length;
   const pending = dayTodos.filter((todo) => !todo.completed && !todo.shifted).length;
   const shifted = dayTodos.filter(
@@ -910,11 +911,11 @@ function renderPerformance(dayTodos) {
   const efficiencyPct = totalPriority
     ? Math.round((completedPriority / totalPriority) * 100)
     : 0;
-  const overallTotalPriority = todos.reduce(
+  const overallTotalPriority = overallScopeTodos.reduce(
     (sum, todo) => sum + getPriorityWeight(todo.priority),
     0
   );
-  const overallCompletedPriority = todos
+  const overallCompletedPriority = overallScopeTodos
     .filter((todo) => todo.completed)
     .reduce((sum, todo) => sum + getPriorityWeight(todo.priority), 0);
   const overallEfficiencyPct = overallTotalPriority
