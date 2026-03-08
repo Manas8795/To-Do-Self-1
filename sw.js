@@ -1,4 +1,4 @@
-const CACHE_NAME = "todo-pwa-v3";
+const CACHE_NAME = "todo-pwa-v2";
 const URLS_TO_CACHE = [
   "/",
   "/index.html",
@@ -34,23 +34,8 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   const isSameOrigin = url.origin === self.location.origin;
-  const isNavigationRequest = event.request.mode === "navigate";
 
-  // Keep navigation responsive offline with app-shell fallback.
-  if (isNavigationRequest) {
-    event.respondWith(
-      fetch(event.request)
-        .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
-          return response;
-        })
-        .catch(() => caches.match("/index.html"))
-    );
-    return;
-  }
-
-  // Same-origin static assets: network-first, then cache fallback.
+  // For app shell assets, prefer network so deployed updates are picked up.
   if (isSameOrigin) {
     event.respondWith(
       fetch(event.request)
@@ -59,14 +44,23 @@ self.addEventListener("fetch", (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
           return response;
         })
-        .catch(() => caches.match(event.request))
+        .catch(() =>
+          caches.match(event.request).then((cached) => cached || caches.match("/index.html"))
+        )
     );
     return;
   }
 
-  // Cross-origin requests (Supabase/CDN/API) should not be cached by the SW.
-  // This prevents stale API responses in installed app mode.
   event.respondWith(
-    fetch(event.request).catch(() => caches.match(event.request))
+    caches.match(event.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(event.request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+          return response;
+        })
+        .catch(() => caches.match("/index.html"));
+    })
   );
 });

@@ -9,13 +9,41 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main class="app">
+  <section id="auth-shell" class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-card-head">
+        <h2 id="auth-title">Sign in</h2>
+        <p id="auth-copy">Use your account to load your tasks and notes.</p>
+      </div>
+      <form id="auth-form" class="auth-form">
+        <label class="auth-field">
+          <span>Email</span>
+          <input id="auth-email" type="email" autocomplete="email" required />
+        </label>
+        <label class="auth-field">
+          <span>Password</span>
+          <input id="auth-password" type="password" autocomplete="current-password" minlength="6" required />
+        </label>
+        <button id="auth-submit" type="submit">Sign in</button>
+      </form>
+      <p id="auth-message" class="auth-message"></p>
+      <button id="auth-toggle" class="auth-toggle" type="button">
+        Need an account? Create one
+      </button>
+    </div>
+  </section>
+
+  <main id="app-shell" class="app" hidden>
     <header class="app-header">
       <div>
         <h1>To-Do</h1>
         <p>Plan less. Finish more.</p>
       </div>
       <div class="header-controls">
+        <div id="user-panel" class="user-panel" hidden>
+          <span id="auth-state" class="auth-state">Signed out</span>
+          <button id="sign-out" class="sign-out-btn" type="button">Sign out</button>
+        </div>
         <button id="install-app" class="install-app" type="button" hidden>Install app</button>
         <select id="theme-select" class="theme-select" aria-label="Select theme">
           <option value="light">Light</option>
@@ -27,16 +55,31 @@
         </select>
       </div>
     </header>
-
-    <section class="app-layout">
-      <section class="calendar" aria-label="Task calendar">
-        <div class="calendar-head">
-          <button id="prev-month" type="button" aria-label="Previous month">Prev</button>
-          <h2 id="calendar-title"></h2>
-          <button id="next-month" type="button" aria-label="Next month">Next</button>
-        </div>
-        <div id="calendar-grid" class="calendar-grid"></div>
-        <p class="calendar-help">Click a day to view that day's tasks. Dots show days with tasks.</p>
+    <section id="app-layout" class="app-layout">
+      <section class="calendar-column">
+        <section class="calendar" aria-label="Task calendar">
+          <div class="calendar-head">
+            <button id="prev-month" type="button" aria-label="Previous month">Prev</button>
+            <h2 id="calendar-title"></h2>
+            <button id="next-month" type="button" aria-label="Next month">Next</button>
+          </div>
+          <div id="calendar-grid" class="calendar-grid"></div>
+          <p class="calendar-help">Click a day to view that day's tasks. Dots show days with tasks.</p>
+        </section>
+        <section class="short-notes" aria-label="Short notes">
+          <div class="short-notes-head">
+            <h3>Short notes</h3>
+            <span id="notes-date"></span>
+          </div>
+          <textarea
+            id="notes-input"
+            class="notes-input"
+            placeholder="Write a quick note for this day..."
+          ></textarea>
+          <div class="notes-actions">
+            <button id="notes-save" class="notes-save" type="button">Save note</button>
+          </div>
+        </section>
       </section>
 
       <section class="tasks-panel">
@@ -86,6 +129,18 @@
               </div>
               <small>Task split</small>
             </div>
+            <div class="donut-wrap">
+              <div id="efficiency-donut" class="performance-donut efficiency-donut">
+                <span id="efficiency-rate">0%</span>
+              </div>
+              <small>Efficiency</small>
+            </div>
+            <div class="donut-wrap">
+              <div id="overall-efficiency-donut" class="performance-donut overall-efficiency-donut">
+                <span id="overall-efficiency-rate">0%</span>
+              </div>
+              <small>Overall efficiency</small>
+            </div>
           </div>
           <div class="pie-legend">
             <div class="legend-item"><i class="dot completed"></i>Completed: <strong id="count-completed">0</strong></div>
@@ -124,6 +179,54 @@
       </div>
     </li>
   </template>
+
+  <dialog id="task-editor" class="task-editor">
+    <form id="task-editor-form" class="task-editor-form" method="dialog">
+      <div class="task-editor-head">
+        <h3>Edit task</h3>
+      </div>
+
+      <label class="editor-field">
+        <span>Task</span>
+        <input id="editor-text" type="text" maxlength="120" required />
+      </label>
+
+      <div class="editor-grid">
+        <label class="editor-field">
+          <span>Deadline</span>
+          <input id="editor-time" type="time" />
+        </label>
+        <label class="editor-field">
+          <span>Level</span>
+          <select id="editor-priority">
+            <option value="low">Low</option>
+            <option value="moderate">Moderate</option>
+            <option value="high">High</option>
+          </select>
+        </label>
+      </div>
+
+      <fieldset class="repeat-fieldset">
+        <legend>Repeat this task</legend>
+        <label class="repeat-option">
+          <input id="repeat-weekdays" type="checkbox" value="weekdays" />
+          <span>Weekdays</span>
+        </label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="monday" /><span>Monday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="tuesday" /><span>Tuesday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="wednesday" /><span>Wednesday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="thursday" /><span>Thursday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="friday" /><span>Friday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="saturday" /><span>Saturday</span></label>
+        <label class="repeat-option"><input class="repeat-day" type="checkbox" value="sunday" /><span>Sunday</span></label>
+      </fieldset>
+
+      <div class="task-editor-actions">
+        <button id="editor-cancel" type="button">Cancel</button>
+        <button id="editor-save" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script src="app.js"></script>
