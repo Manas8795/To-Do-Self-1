@@ -74,6 +74,7 @@ let dayNotes = {};
 let currentUser = null;
 let authMode = "signin";
 let authReady = false;
+let localChangesTimestamp = 0;
 
 initTheme();
 bindUiEvents();
@@ -206,65 +207,96 @@ function bindUiEvents() {
 }
 
 async function initSupabase() {
+  // Wait for Supabase library to load
+  let retries = 0;
+  while (!window.supabase?.createClient && retries < 50) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    retries++;
+  }
+
   if (!window.supabase?.createClient || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
     setSyncState("Sync: Supabase not configured");
-    setAuthMessage("Supabase is not configured.", true);
+    setAuthMessage("Supabase failed to load. Please refresh the page.", true);
     return;
   }
 
-  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  try {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    setSyncState("Sync: initializing...");
 
-  const {
-    data: { session },
-    error,
-  } = await supabaseClient.auth.getSession();
+    const {
+      data: { session },
+      error,
+    } = await supabaseClient.auth.getSession();
 
-  if (error) {
-    setAuthMessage(error.message, true);
-    setSyncState(`Sync error: ${error.message}`);
+    if (error) {
+      console.error("Auth error:", error);
+      setSyncState(`Sync: ready`);
+    } else {
+      setSyncState("Sync: ready");
+    }
+
+    supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
+      void applySession(nextSession);
+    });
+
+    authReady = true;
+    if (session) {
+      await applySession(session);
+    } else {
+      setAuthMessage("Ready to sign in.");
+    }
+  } catch (err) {
+    console.error("Supabase init error:", err);
+    setAuthMessage("Failed to initialize Supabase. Please refresh.", true);
   }
-
-  supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
-    void applySession(nextSession);
-  });
-
-  authReady = true;
-  await applySession(session);
 }
 
 async function submitAuthForm() {
-  if (!supabaseClient) return;
+  if (!supabaseClient) {
+    setAuthMessage("Supabase not ready. Please wait and try again.", true);
+    return;
+  }
 
   const email = authEmail.value.trim();
   const password = authPassword.value;
-  if (!email || !password) return;
+  if (!email || !password) {
+    setAuthMessage("Please enter both email and password.", true);
+    return;
+  }
 
   authSubmit.disabled = true;
   setAuthMessage(authMode === "signin" ? "Signing in..." : "Creating account...");
 
-  const action = authMode === "signin"
-    ? supabaseClient.auth.signInWithPassword({ email, password })
-    : supabaseClient.auth.signUp({ email, password });
+  try {
+    const action = authMode === "signin"
+      ? supabaseClient.auth.signInWithPassword({ email, password })
+      : supabaseClient.auth.signUp({ email, password });
 
-  const { error, data } = await action;
-  authSubmit.disabled = false;
+    const { error, data } = await action;
 
-  if (error) {
-    setAuthMessage(error.message, true);
-    return;
-  }
+    if (error) {
+      authSubmit.disabled = false;
+      setAuthMessage(error.message || "Authentication failed", true);
+      return;
+    }
 
-  if (authMode === "signup" && !data.session) {
-    setAuthMessage("Account created. Check your email if confirmation is enabled.");
-    authMode = "signin";
-    renderAuthMode();
-    return;
-  }
+    if (authMode === "signup" && !data.session) {
+      authSubmit.disabled = false;
+      setAuthMessage("Account created. Check your email if confirmation is enabled.");
+      authMode = "signin";
+      renderAuthMode();
+      return;
+    }
 
-  authPassword.value = "";
-  setAuthMessage("Authenticated.");
-  if (data.session) {
-    await applySession(data.session);
+    authPassword.value = "";
+    setAuthMessage("Authenticated. Loading your data...");
+    if (data.session) {
+      await applySession(data.session);
+    }
+  } catch (err) {
+    authSubmit.disabled = false;
+    setAuthMessage(`Error: ${err.message || "Authentication failed"}`, true);
   }
 }
 
@@ -294,8 +326,7 @@ async function applySession(session) {
     return;
   }
 
-  todos = loadTodosLocal();
-  dayNotes = loadNotesLocal();
+  // Initialize UI immediately with empty state
   selectedDate = todayKey;
   calendarViewDate = new Date();
   currentFilter = "pending";
@@ -304,18 +335,32 @@ async function applySession(session) {
   });
 
   renderShell();
-  render();
   setSyncState("Sync: loading...");
 
-  await loadTodosFromSupabase(true, false);
-  await loadNotesFromSupabase(true, false);
+  // Load from cloud first, then local as fallback
+  try {
+    await loadTodosFromSupabase(true, false);
+    await loadNotesFromSupabase(true, false);
+  } catch (err) {
+    console.error("Cloud load failed, falling back to local:", err);
+    todos = loadTodosLocal();
+    dayNotes = loadNotesLocal();
+    render();
+  }
 
+  render();
+
+  // Subscribe to real-time changes AFTER initial load
+  subscribeToTodosChanges();
+  subscribeToNotesChanges();
+
+  // Keep polling as fallback (every 30 seconds)
   pullTimer = setInterval(() => {
     void loadTodosFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
   notesPullTimer = setInterval(() => {
     void loadNotesFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
 }
 
 function stopPullTimers() {
@@ -327,6 +372,47 @@ function stopPullTimers() {
     clearInterval(notesPullTimer);
     notesPullTimer = null;
   }
+}
+
+function subscribeToTodosChanges() {
+  if (!supabaseClient || !currentUser) return;
+  
+  supabaseClient
+    .channel(`todos-${currentUser.id}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "todos",
+        filter: `user_id=eq.${currentUser.id}`,
+      },
+      () => {
+        // Refresh data on external changes
+        void loadTodosFromSupabase(true, true);
+      }
+    )
+    .subscribe();
+}
+
+function subscribeToNotesChanges() {
+  if (!supabaseClient || !currentUser) return;
+  
+  supabaseClient
+    .channel(`notes-${currentUser.id}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "day_notes",
+        filter: `user_id=eq.${currentUser.id}`,
+      },
+      () => {
+        void loadNotesFromSupabase(true, true);
+      }
+    )
+    .subscribe();
 }
 
 function renderShell() {
@@ -352,92 +438,110 @@ function renderAuthMode() {
   authPassword.autocomplete = signingIn ? "current-password" : "new-password";
 }
 
+let pendingRender = false;
+
 function render() {
+  // Debounce renders slightly to batch multiple changes
+  if (pendingRender) return;
+  
+  pendingRender = true;
+  setTimeout(() => {
+    pendingRender = false;
+    doRender();
+  }, 16); // One frame (60fps)
+}
+
+function doRender() {
   if (!currentUser) {
     list.innerHTML = "";
     renderOverdueSection();
     renderPerformance([]);
     renderShortNotes();
-    renderCalendar();
+    renderCalendarLite();
     tasksLeft.textContent = "Sign in to load your tasks";
     return;
   }
 
   generateRecurringTasksUpTo(maxDateKey(todayKey, selectedDate));
   autoShiftOverdueTasks();
-  list.innerHTML = "";
-  const dayTodos = getDayTodos();
-  const dayScopeTodos = getDayScopeTodos();
-  const filtered = getFilteredTodos(dayTodos);
-  const fragment = document.createDocumentFragment();
+  
+  // Only update list if it exists
+  if (list.parentElement) {
+    list.innerHTML = "";
+    const dayTodos = getDayTodos();
+    const dayScopeTodos = getDayScopeTodos();
+    const filtered = getFilteredTodos(dayTodos);
+    const fragment = document.createDocumentFragment();
 
-  filtered.forEach((todo) => {
-    const node = itemTemplate.content.firstElementChild.cloneNode(true);
-    node.dataset.id = todo.id;
-    node.classList.toggle("completed", todo.completed);
+    filtered.forEach((todo) => {
+      const node = itemTemplate.content.firstElementChild.cloneNode(true);
+      node.dataset.id = todo.id;
+      node.classList.toggle("completed", todo.completed);
 
-    const checkbox = node.querySelector(".todo-check");
-    const text = node.querySelector(".todo-text");
-    const level = node.querySelector(".todo-priority");
-    const time = node.querySelector(".todo-time");
-    const editBtn = node.querySelector(".edit-btn");
-    const deleteBtn = node.querySelector(".delete-btn");
+      const checkbox = node.querySelector(".todo-check");
+      const text = node.querySelector(".todo-text");
+      const level = node.querySelector(".todo-priority");
+      const time = node.querySelector(".todo-time");
+      const editBtn = node.querySelector(".edit-btn");
+      const deleteBtn = node.querySelector(".delete-btn");
 
-    checkbox.checked = todo.completed;
-    text.textContent = todo.text;
-    node.classList.toggle("shifted", Boolean(todo.shifted));
-    level.textContent = capitalize(todo.priority);
-    level.className = `todo-priority priority-${todo.priority}`;
+      checkbox.checked = todo.completed;
+      text.textContent = todo.text;
+      node.classList.toggle("shifted", Boolean(todo.shifted));
+      level.textContent = capitalize(todo.priority);
+      level.className = `todo-priority priority-${todo.priority}`;
 
-    const meta = [];
-    if (todo.shifted && todo.taskDate !== selectedDate) {
-      meta.push(`Shifted to ${formatDateLabel(todo.taskDate)}`);
-    } else if (todo.shifted && todo.shiftedFrom) {
-      meta.push(`Shifted from ${formatDateLabel(todo.shiftedFrom)}`);
+      const meta = [];
+      if (todo.shifted && todo.taskDate !== selectedDate) {
+        meta.push(`Shifted to ${formatDateLabel(todo.taskDate)}`);
+      } else if (todo.shifted && todo.shiftedFrom) {
+        meta.push(`Shifted from ${formatDateLabel(todo.shiftedFrom)}`);
+      }
+      if (todo.deadlineTime) {
+        meta.push(`Deadline: ${formatTime(todo.deadlineTime)}`);
+      }
+      time.textContent = meta.join(" | ");
+
+      checkbox.addEventListener("change", () => {
+        todo.completed = checkbox.checked;
+        saveTodos();
+        render();
+      });
+
+      editBtn.addEventListener("click", () => {
+        openTaskEditor(todo.id);
+      });
+
+      deleteBtn.addEventListener("click", () => {
+        todos = todos.filter((item) => item.id !== todo.id);
+        saveTodos();
+        render();
+      });
+
+      fragment.appendChild(node);
+    });
+
+    if (filtered.length === 0) {
+      const emptyState = document.createElement("li");
+      emptyState.className = "todo-item";
+      emptyState.textContent = `No ${currentFilter} tasks for ${formatDateLabel(selectedDate)}.`;
+      list.appendChild(emptyState);
+    } else {
+      list.appendChild(fragment);
     }
-    if (todo.deadlineTime) {
-      meta.push(`Deadline: ${formatTime(todo.deadlineTime)}`);
-    }
-    time.textContent = meta.join(" | ");
 
-    checkbox.addEventListener("change", () => {
-      todo.completed = checkbox.checked;
-      saveTodos();
-      render();
-    });
-
-    editBtn.addEventListener("click", () => {
-      openTaskEditor(todo.id);
-    });
-
-    deleteBtn.addEventListener("click", () => {
-      todos = todos.filter((item) => item.id !== todo.id);
-      saveTodos();
-      render();
-    });
-
-    fragment.appendChild(node);
-  });
-
-  if (filtered.length === 0) {
-    const emptyState = document.createElement("li");
-    emptyState.className = "todo-item";
-    emptyState.textContent = `No ${currentFilter} tasks for ${formatDateLabel(selectedDate)}.`;
-    list.appendChild(emptyState);
-  } else {
-    list.appendChild(fragment);
+    const activeCount = todos.filter(
+      (todo) =>
+        !todo.completed &&
+        (todo.taskDate === selectedDate || todo.originalDate === selectedDate)
+    ).length;
+    tasksLeft.textContent = `${activeCount} task${activeCount === 1 ? "" : "s"} left for ${formatDateLabel(selectedDate)}`;
+    renderPerformance(dayScopeTodos);
   }
-
-  const activeCount = todos.filter(
-    (todo) =>
-      !todo.completed &&
-      (todo.taskDate === selectedDate || todo.originalDate === selectedDate)
-  ).length;
-  tasksLeft.textContent = `${activeCount} task${activeCount === 1 ? "" : "s"} left for ${formatDateLabel(selectedDate)}`;
-  renderPerformance(dayScopeTodos);
+  
   renderOverdueSection();
   renderShortNotes();
-  renderCalendar();
+  renderCalendarLite();
 }
 
 function getFilteredTodos(dayTodos) {
@@ -532,6 +636,7 @@ function getShiftedTodosForSelectedDate() {
 }
 
 function saveTodos() {
+  localChangesTimestamp = Date.now();
   saveTodosLocal();
   if (currentUser) {
     void syncTodosToSupabase();
@@ -565,100 +670,117 @@ function loadNotesLocal() {
     return {};
   }
 }
+let syncTodoTimeout = null;
+
 async function syncTodosToSupabase() {
   if (!supabaseClient || !currentUser) return;
-  if (syncInFlight) {
-    syncQueued = true;
-    return;
+  
+  // Clear any pending sync timer
+  if (syncTodoTimeout) {
+    clearTimeout(syncTodoTimeout);
   }
+  
+  // Debounce sync requests - wait 300ms after last change
+  syncTodoTimeout = setTimeout(async () => {
+    if (syncInFlight) {
+      syncQueued = true;
+      return;
+    }
 
-  syncInFlight = true;
-  setSyncState("Sync: writing...");
-  let hadError = false;
+    syncInFlight = true;
+    setSyncState("Sync: writing...");
 
-  try {
-    const rows = todos.map((todo) => ({
-      id: todo.id,
-      user_id: currentUser.id,
-      text: todo.text,
-      completed: todo.completed,
-      task_date: todo.taskDate,
-      original_date: todo.originalDate,
-      shifted: todo.shifted,
-      shifted_from: todo.shiftedFrom,
-      priority: todo.priority,
-      repeat_days: todo.repeatDays,
-      series_id: todo.seriesId,
-      deadline_time: todo.deadlineTime,
-      created_at: new Date(todo.createdAt).toISOString(),
-    }));
+    try {
+      const rows = todos.map((todo) => ({
+        id: todo.id,
+        user_id: currentUser.id,
+        text: todo.text,
+        completed: todo.completed,
+        task_date: todo.taskDate,
+        original_date: todo.originalDate,
+        shifted: todo.shifted,
+        shifted_from: todo.shiftedFrom,
+        priority: todo.priority,
+        repeat_days: todo.repeatDays,
+        series_id: todo.seriesId,
+        deadline_time: todo.deadlineTime,
+        created_at: new Date(todo.createdAt).toISOString(),
+      }));
 
-    if (rows.length > 0) {
-      const { error } = await supabaseClient
+      // Delete all old todos then insert new ones (simpler, less prone to conflicts)
+      await supabaseClient
         .from("todos")
-        .upsert(rows, { onConflict: "id" });
-      if (error) {
-        hadError = true;
-        setSyncState(`Sync error: ${error.message}`);
-        console.error("Supabase sync upsert failed:", error.message);
-        return;
+        .delete()
+        .eq("user_id", currentUser.id);
+
+      if (rows.length > 0) {
+        const { error } = await supabaseClient
+          .from("todos")
+          .insert(rows);
+        
+        if (error) {
+          setSyncState(`Sync error: ${error.message}`);
+          console.error("Sync failed:", error.message);
+          syncInFlight = false;
+          if (syncQueued) {
+            syncQueued = false;
+            void syncTodosToSupabase();
+          }
+          return;
+        }
+      }
+
+      setSyncState("Sync: up to date");
+    } catch (err) {
+      setSyncState("Sync: error");
+      console.error("Sync error:", err);
+    } finally {
+      syncInFlight = false;
+      if (syncQueued) {
+        syncQueued = false;
+        void syncTodosToSupabase();
       }
     }
-
-    let cleanupQuery = supabaseClient.from("todos").delete().eq("user_id", currentUser.id);
-    if (rows.length > 0) {
-      cleanupQuery = cleanupQuery.not(
-        "id",
-        "in",
-        `(${rows.map((row) => `"${row.id}"`).join(",")})`
-      );
-    }
-    const { error: cleanupError } = await cleanupQuery;
-    if (cleanupError) {
-      console.warn("Supabase cleanup failed:", cleanupError.message);
-    }
-  } finally {
-    syncInFlight = false;
-    if (!hadError) {
-      setSyncState("Sync: up to date");
-    }
-    if (syncQueued) {
-      syncQueued = false;
-      void syncTodosToSupabase();
-    }
-  }
+  }, 300);
 }
 
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   if (!supabaseClient || !currentUser) return;
   if (syncInFlight) return;
+  
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
 
-  const { data, error } = await supabaseClient
-    .from("todos")
-    .select("*")
-    .eq("user_id", currentUser.id)
-    .order("created_at", { ascending: false });
+  try {
+    const { data, error } = await supabaseClient
+      .from("todos")
+      .select("*")
+      .eq("user_id", currentUser.id)
+      .order("created_at", { ascending: false });
 
-  if (error) {
-    setSyncState(`Sync error: ${error.message}`);
-    console.error("Supabase load failed:", error.message);
-    return;
-  }
+    if (error) {
+      setSyncState(`Sync error: ${error.message}`);
+      return;
+    }
 
-  const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
-  if (!overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
+    const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
+    
+    // Only update if data actually changed
+    if (isSameTodoSet(todos, cloudTodos)) {
+      setSyncState("Sync: up to date");
+      return;
+    }
+
+    todos = cloudTodos;
+    saveTodosLocal();
+    autoShiftOverdueTasks();
+    render();
     setSyncState("Sync: up to date");
-    return;
+  } catch (err) {
+    setSyncState("Sync: error");
+    console.error("Load error:", err);
   }
-
-  todos = cloudTodos;
-  saveTodosLocal();
-  autoShiftOverdueTasks();
-  render();
-  setSyncState("Sync: up to date");
 }
 
 async function syncNotesToSupabase() {
@@ -773,9 +895,20 @@ function normalizeTodo(item) {
   };
 }
 
-function renderCalendar() {
-  calendarGrid.innerHTML = "";
+let cachedTaskDates = null;
+let lastTaskDatesCacheTime = 0;
 
+function renderCalendarLite() {
+  // Only recalculate if enough time passed or task dates changed
+  const now = Date.now();
+  if (!cachedTaskDates || (now - lastTaskDatesCacheTime > 5000)) {
+    cachedTaskDates = new Set(todos.map((todo) => todo.taskDate));
+    lastTaskDatesCacheTime = now;
+  }
+  
+  const taskDates = cachedTaskDates;
+  
+  // Update only the calendar title and days that changed
   const year = calendarViewDate.getFullYear();
   const month = calendarViewDate.getMonth();
   const firstDay = new Date(year, month, 1);
@@ -783,56 +916,69 @@ function renderCalendar() {
   const offset = (firstDay.getDay() + 6) % 7;
   const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const today = new Date();
-  const taskDates = new Set(todos.map((todo) => todo.taskDate));
+  
   calendarTitle.textContent = `${firstDay.toLocaleString(undefined, { month: "long" })} ${year}`;
+  
+  // Only rebuild if month changed
+  if (calendarGrid.children.length === 0 || calendarGrid.dataset.month !== `${year}-${month}`) {
+    calendarGrid.innerHTML = "";
+    calendarGrid.dataset.month = `${year}-${month}`;
+    
+    weekdays.forEach((dayName) => {
+      const label = document.createElement("div");
+      label.className = "weekday";
+      label.textContent = dayName;
+      calendarGrid.appendChild(label);
+    });
 
-  weekdays.forEach((dayName) => {
-    const label = document.createElement("div");
-    label.className = "weekday";
-    label.textContent = dayName;
-    calendarGrid.appendChild(label);
-  });
-
-  for (let i = 0; i < offset; i += 1) {
-    const spacer = document.createElement("div");
-    spacer.className = "day empty";
-    calendarGrid.appendChild(spacer);
-  }
-
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = new Date(year, month, day);
-    const yyyyMmDd = toYyyyMmDd(date);
-    const cell = document.createElement("div");
-    cell.className = "day";
-    cell.textContent = String(day);
-    cell.setAttribute("role", "button");
-    cell.setAttribute("tabindex", "0");
-
-    if (taskDates.has(yyyyMmDd)) cell.classList.add("has-task");
-    if (yyyyMmDd === selectedDate) cell.classList.add("selected");
-    const todayKeyLocal = toYyyyMmDd(today);
-    if (yyyyMmDd < todayKeyLocal) {
-      cell.classList.add("past");
-    } else if (yyyyMmDd === todayKeyLocal) {
-      cell.classList.add("today");
-    } else {
-      cell.classList.add("future");
+    for (let i = 0; i < offset; i += 1) {
+      const spacer = document.createElement("div");
+      spacer.className = "day empty";
+      calendarGrid.appendChild(spacer);
     }
 
-    cell.addEventListener("click", () => {
-      selectedDate = yyyyMmDd;
-      render();
-    });
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const date = new Date(year, month, day);
+      const yyyyMmDd = toYyyyMmDd(date);
+      const cell = document.createElement("div");
+      cell.className = "day";
+      cell.textContent = String(day);
+      cell.dataset.date = yyyyMmDd;
+      cell.setAttribute("role", "button");
+      cell.setAttribute("tabindex", "0");
 
-    cell.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      selectedDate = yyyyMmDd;
-      render();
-    });
+      cell.addEventListener("click", () => {
+        selectedDate = yyyyMmDd;
+        render();
+      });
 
-    calendarGrid.appendChild(cell);
+      cell.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectedDate = yyyyMmDd;
+        render();
+      });
+
+      calendarGrid.appendChild(cell);
+    }
   }
+  
+  // Update styles for existing cells
+  const todayKeyLocal = toYyyyMmDd(today);
+  const dayCells = calendarGrid.querySelectorAll(".day[data-date]");
+  dayCells.forEach((cell) => {
+    const yyyyMmDd = cell.dataset.date;
+    cell.classList.toggle("has-task", taskDates.has(yyyyMmDd));
+    cell.classList.toggle("selected", yyyyMmDd === selectedDate);
+    cell.classList.toggle("past", yyyyMmDd < todayKeyLocal);
+    cell.classList.toggle("today", yyyyMmDd === todayKeyLocal);
+    cell.classList.toggle("future", yyyyMmDd > todayKeyLocal);
+  });
+}
+
+function renderCalendar() {
+  // Alias for backward compatibility
+  renderCalendarLite();
 }
 
 function getPendingTodosForSelectedDate() {
