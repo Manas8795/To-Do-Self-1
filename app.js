@@ -56,8 +56,7 @@ const THEME_KEY = "todo-app-theme-v1";
 const todayKey = toYyyyMmDd(new Date());
 const WEEKDAY_REPEAT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 
-const SUPABASE_URL = "https://hxgakjlurfydttwqdeke.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_-rJ_1mH7oPlOWw_30156wg_3xUW91uV";
+const SUPABASE_CONFIG_ENDPOINT = "/.netlify/functions/public-config";
 
 let todos = [];
 let currentFilter = "pending";
@@ -206,13 +205,17 @@ function bindUiEvents() {
 }
 
 async function initSupabase() {
-  if (!window.supabase?.createClient || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  const config = await resolveSupabaseConfig();
+  if (!window.supabase?.createClient || !config.url || !config.anonKey) {
     setSyncState("Sync: Supabase not configured");
-    setAuthMessage("Supabase is not configured.", true);
+    setAuthMessage(
+      "Supabase is not configured. Set SUPABASE_URL and SUPABASE_ANON_KEY in Netlify environment variables.",
+      true
+    );
     return;
   }
 
-  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  supabaseClient = window.supabase.createClient(config.url, config.anonKey);
 
   const {
     data: { session },
@@ -230,6 +233,47 @@ async function initSupabase() {
 
   authReady = true;
   await applySession(session);
+}
+
+async function resolveSupabaseConfig() {
+  const fromFunction = await readSupabaseConfigFromFunction();
+  if (fromFunction.url && fromFunction.anonKey) {
+    return fromFunction;
+  }
+
+  const fromWindow = {
+    url: typeof window.SUPABASE_URL === "string" ? window.SUPABASE_URL.trim() : "",
+    anonKey:
+      typeof window.SUPABASE_ANON_KEY === "string"
+        ? window.SUPABASE_ANON_KEY.trim()
+        : "",
+  };
+  if (fromWindow.url && fromWindow.anonKey) {
+    return fromWindow;
+  }
+
+  return { url: "", anonKey: "" };
+}
+
+async function readSupabaseConfigFromFunction() {
+  try {
+    const response = await fetch(SUPABASE_CONFIG_ENDPOINT, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      return { url: "", anonKey: "" };
+    }
+
+    const payload = await response.json();
+    return {
+      url: typeof payload?.supabaseUrl === "string" ? payload.supabaseUrl.trim() : "",
+      anonKey:
+        typeof payload?.supabaseAnonKey === "string" ? payload.supabaseAnonKey.trim() : "",
+    };
+  } catch {
+    return { url: "", anonKey: "" };
+  }
 }
 
 async function submitAuthForm() {
