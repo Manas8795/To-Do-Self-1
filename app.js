@@ -74,6 +74,7 @@ let dayNotes = {};
 let currentUser = null;
 let authMode = "signin";
 let authReady = false;
+let localChangesTimestamp = 0;
 
 initTheme();
 bindUiEvents();
@@ -233,38 +234,50 @@ async function initSupabase() {
 }
 
 async function submitAuthForm() {
-  if (!supabaseClient) return;
+  if (!supabaseClient) {
+    setAuthMessage("Supabase not ready. Please wait and try again.", true);
+    return;
+  }
 
   const email = authEmail.value.trim();
   const password = authPassword.value;
-  if (!email || !password) return;
+  if (!email || !password) {
+    setAuthMessage("Please enter both email and password.", true);
+    return;
+  }
 
   authSubmit.disabled = true;
   setAuthMessage(authMode === "signin" ? "Signing in..." : "Creating account...");
 
-  const action = authMode === "signin"
-    ? supabaseClient.auth.signInWithPassword({ email, password })
-    : supabaseClient.auth.signUp({ email, password });
+  try {
+    const action = authMode === "signin"
+      ? supabaseClient.auth.signInWithPassword({ email, password })
+      : supabaseClient.auth.signUp({ email, password });
 
-  const { error, data } = await action;
-  authSubmit.disabled = false;
+    const { error, data } = await action;
 
-  if (error) {
-    setAuthMessage(error.message, true);
-    return;
-  }
+    if (error) {
+      authSubmit.disabled = false;
+      setAuthMessage(error.message || "Authentication failed", true);
+      return;
+    }
 
-  if (authMode === "signup" && !data.session) {
-    setAuthMessage("Account created. Check your email if confirmation is enabled.");
-    authMode = "signin";
-    renderAuthMode();
-    return;
-  }
+    if (authMode === "signup" && !data.session) {
+      authSubmit.disabled = false;
+      setAuthMessage("Account created. Check your email if confirmation is enabled.");
+      authMode = "signin";
+      renderAuthMode();
+      return;
+    }
 
-  authPassword.value = "";
-  setAuthMessage("Authenticated.");
-  if (data.session) {
-    await applySession(data.session);
+    authPassword.value = "";
+    setAuthMessage("Authenticated. Loading your data...");
+    if (data.session) {
+      await applySession(data.session);
+    }
+  } catch (err) {
+    authSubmit.disabled = false;
+    setAuthMessage(`Error: ${err.message || "Authentication failed"}`, true);
   }
 }
 
@@ -294,8 +307,7 @@ async function applySession(session) {
     return;
   }
 
-  todos = loadTodosLocal();
-  dayNotes = loadNotesLocal();
+  // Initialize UI immediately with empty state
   selectedDate = todayKey;
   calendarViewDate = new Date();
   currentFilter = "pending";
@@ -304,13 +316,22 @@ async function applySession(session) {
   });
 
   renderShell();
-  render();
   setSyncState("Sync: loading...");
 
-  await loadTodosFromSupabase(true, false);
-  await loadNotesFromSupabase(true, false);
+  // Load from cloud first, then local as fallback
+  try {
+    await loadTodosFromSupabase(true, false);
+    await loadNotesFromSupabase(true, false);
+  } catch (err) {
+    console.error("Cloud load failed, falling back to local:", err);
+    todos = loadTodosLocal();
+    dayNotes = loadNotesLocal();
+    render();
+  }
 
-  // Subscribe to real-time changes
+  render();
+
+  // Subscribe to real-time changes AFTER initial load
   subscribeToTodosChanges();
   subscribeToNotesChanges();
 
@@ -334,6 +355,8 @@ function stopPullTimers() {
   }
 }
 
+let lastSyncTime = 0;
+
 function subscribeToTodosChanges() {
   if (!supabaseClient || !currentUser) return;
   
@@ -348,7 +371,12 @@ function subscribeToTodosChanges() {
         filter: `user_id=eq.${currentUser.id}`,
       },
       (payload) => {
-        void loadTodosFromSupabase(true, true, true);
+        // Debounce real-time updates to prevent thrashing
+        const now = Date.now();
+        if (now - lastSyncTime > 1000) {
+          lastSyncTime = now;
+          void loadTodosFromSupabase(true, true, true);
+        }
       }
     )
     .subscribe();
@@ -601,6 +629,7 @@ function getShiftedTodosForSelectedDate() {
 }
 
 function saveTodos() {
+  localChangesTimestamp = Date.now();
   saveTodosLocal();
   if (currentUser) {
     void syncTodosToSupabase();
@@ -742,8 +771,17 @@ async function loadTodosFromSupabase(overwriteLocal = true, quiet = false, force
   }
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
+  
+  // Don't overwrite if local changes are very recent (within 2 seconds)
+  const hasRecentLocalChanges = localChangesTimestamp && (Date.now() - localChangesTimestamp < 2000);
+  
   if (!forceRender && !overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
     setSyncState("Sync: up to date");
+    return;
+  }
+  
+  if (hasRecentLocalChanges && !forceRender) {
+    setSyncState("Sync: local changes pending...");
     return;
   }
 
