@@ -74,6 +74,11 @@ let dayNotes = {};
 let currentUser = null;
 let authMode = "signin";
 let authReady = false;
+let lastServerTodoHash = null;
+let lastServerNotesHash = null;
+let syncDebounceTimer = null;
+let lastSyncTime = 0;
+let isUserEditing = false;
 
 initTheme();
 bindUiEvents();
@@ -91,6 +96,7 @@ function bindUiEvents() {
     const text = input.value.trim();
     if (!text) return;
 
+    isUserEditing = true;
     todos.unshift({
       id: crypto.randomUUID(),
       userId: currentUser.id,
@@ -112,6 +118,7 @@ function bindUiEvents() {
     priorityInput.value = "moderate";
     saveTodos();
     render();
+    setTimeout(() => { isUserEditing = false; }, 3000);
   });
 
   clearCompletedBtn.addEventListener("click", () => {
@@ -121,11 +128,13 @@ function bindUiEvents() {
     );
     if (!hasCompleted) return;
 
+    isUserEditing = true;
     todos = todos.filter(
       (todo) => !(todo.taskDate === selectedDate && todo.completed)
     );
     saveTodos();
     render();
+    setTimeout(() => { isUserEditing = false; }, 3000);
   });
 
   filterButtons.forEach((button) => {
@@ -310,12 +319,13 @@ async function applySession(session) {
   await loadTodosFromSupabase(true, false);
   await loadNotesFromSupabase(true, false);
 
+  // Longer polling intervals to reduce conflicts (30 seconds instead of 15)
   pullTimer = setInterval(() => {
     void loadTodosFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
   notesPullTimer = setInterval(() => {
     void loadNotesFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
 }
 
 function stopPullTimers() {
@@ -401,9 +411,11 @@ function render() {
     time.textContent = meta.join(" | ");
 
     checkbox.addEventListener("change", () => {
+      isUserEditing = true;
       todo.completed = checkbox.checked;
       saveTodos();
       render();
+      setTimeout(() => { isUserEditing = false; }, 3000);
     });
 
     editBtn.addEventListener("click", () => {
@@ -411,9 +423,11 @@ function render() {
     });
 
     deleteBtn.addEventListener("click", () => {
+      isUserEditing = true;
       todos = todos.filter((item) => item.id !== todo.id);
       saveTodos();
       render();
+      setTimeout(() => { isUserEditing = false; }, 3000);
     });
 
     fragment.appendChild(node);
@@ -534,8 +548,22 @@ function getShiftedTodosForSelectedDate() {
 function saveTodos() {
   saveTodosLocal();
   if (currentUser) {
-    void syncTodosToSupabase();
+    debounceSyncTodos();
   }
+}
+
+function debounceSyncTodos() {
+  if (syncDebounceTimer) {
+    clearTimeout(syncDebounceTimer);
+  }
+  const now = Date.now();
+  const timeSinceLastSync = now - lastSyncTime;
+  const delayMs = Math.max(500, 2000 - timeSinceLastSync);
+  
+  syncDebounceTimer = setTimeout(() => {
+    void syncTodosToSupabase();
+    syncDebounceTimer = null;
+  }, delayMs);
 }
 
 function saveTodosLocal() {
@@ -619,12 +647,14 @@ async function syncTodosToSupabase() {
     }
   } finally {
     syncInFlight = false;
+    lastSyncTime = Date.now();
     if (!hadError) {
       setSyncState("Sync: up to date");
+      lastServerTodoHash = generateTodoHash(todos);
     }
     if (syncQueued) {
       syncQueued = false;
-      void syncTodosToSupabase();
+      void debounceSyncTodos();
     }
   }
 }
@@ -632,6 +662,9 @@ async function syncTodosToSupabase() {
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   if (!supabaseClient || !currentUser) return;
   if (syncInFlight) return;
+  // Don't pull while user is actively editing
+  if (!quiet && isUserEditing) return;
+  
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
@@ -649,16 +682,40 @@ async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   }
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
-  if (!overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
-    setSyncState("Sync: up to date");
+  const cloudHash = generateTodoHash(cloudTodos);
+  const localHash = generateTodoHash(todos);
+  
+  // If server hash matches, we're in sync
+  if (lastServerTodoHash === cloudHash && localHash === cloudHash) {
+    if (!quiet) setSyncState("Sync: up to date");
     return;
   }
+  
+  // Only overwrite if explicitly requested or if local hasn't changed
+  if (overwriteLocal || localHash === lastServerTodoHash) {
+    todos = cloudTodos;
+    saveTodosLocal();
+    autoShiftOverdueTasks();
+    render();
+    lastServerTodoHash = cloudHash;
+  }
+  
+  if (!quiet) setSyncState("Sync: up to date");
+}
 
-  todos = cloudTodos;
-  saveTodosLocal();
-  autoShiftOverdueTasks();
-  render();
-  setSyncState("Sync: up to date");
+function generateTodoHash(todoList) {
+  const hashInput = JSON.stringify(
+    todoList
+      .map((t) => ({ id: t.id, text: t.text, completed: t.completed, taskDate: t.taskDate, priority: t.priority, deadlineTime: t.deadlineTime }))
+      .sort((a, b) => a.id.localeCompare(b.id))
+  );
+  let hash = 0;
+  for (let i = 0; i < hashInput.length; i += 1) {
+    const char = hashInput.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return hash;
 }
 
 async function syncNotesToSupabase() {
@@ -698,11 +755,15 @@ async function syncNotesToSupabase() {
     console.warn("Supabase note cleanup failed:", cleanupError.message);
   }
 
+  lastServerNotesHash = JSON.stringify(Object.entries(dayNotes).sort());
   setSyncState("Sync: note saved");
 }
 
 async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
   if (!supabaseClient || !currentUser) return;
+  // Don't pull while user is editing notes
+  if (!quiet && isUserEditing) return;
+  
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
@@ -725,13 +786,21 @@ async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
       .map((row) => [row.note_date, typeof row.note_text === "string" ? row.note_text : ""])
   );
 
-  if (!overwriteLocal && isSameNotesMap(dayNotes, cloudNotes)) {
+  const cloudHash = JSON.stringify(Object.entries(cloudNotes).sort());
+  const localHash = JSON.stringify(Object.entries(dayNotes).sort());
+
+  // If server hash matches, we're in sync
+  if (lastServerNotesHash === cloudHash && localHash === cloudHash) {
     return;
   }
 
-  dayNotes = cloudNotes;
-  saveNotesLocal();
-  renderShortNotes();
+  // Only overwrite if explicitly requested or if local hasn't changed
+  if (overwriteLocal || localHash === lastServerNotesHash) {
+    dayNotes = cloudNotes;
+    saveNotesLocal();
+    renderShortNotes();
+    lastServerNotesHash = cloudHash;
+  }
 }
 
 function loadTodosLocal() {
@@ -883,6 +952,7 @@ function renderShortNotes() {
 
 function saveCurrentNote() {
   if (!currentUser) return;
+  isUserEditing = true;
   dayNotes[selectedDate] = notesInput.value;
   saveNotesLocal();
   if (supabaseClient) {
@@ -890,6 +960,7 @@ function saveCurrentNote() {
   } else {
     setSyncState("Sync: note saved locally");
   }
+  setTimeout(() => { isUserEditing = false; }, 3000);
 }
 
 function renderPerformance(dayTodos) {
