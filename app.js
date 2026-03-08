@@ -56,8 +56,8 @@ const THEME_KEY = "todo-app-theme-v1";
 const todayKey = toYyyyMmDd(new Date());
 const WEEKDAY_REPEAT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://hxgakjlurfydttwqdeke.supabase.co";
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_-rJ_1mH7oPlOWw_30156wg_3xUW91uV";
+const SUPABASE_URL = "https://hxgakjlurfydttwqdeke.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_-rJ_1mH7oPlOWw_30156wg_3xUW91uV";
 
 let todos = [];
 let currentFilter = "pending";
