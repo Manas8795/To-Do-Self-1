@@ -1,4 +1,4 @@
-const CACHE_NAME = "todo-pwa-v2";
+const CACHE_NAME = "todo-pwa-v3";
 const URLS_TO_CACHE = [
   "/",
   "/index.html",
@@ -34,6 +34,12 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(event.request.url);
   const isSameOrigin = url.origin === self.location.origin;
+
+  // Never cache Supabase API/auth responses; they must always come from network.
+  if (url.hostname.endsWith(".supabase.co")) {
+    event.respondWith(fetch(event.request));
+    return;
+  }
 
   // For app shell assets, prefer network so deployed updates are picked up.
   if (isSameOrigin) {
