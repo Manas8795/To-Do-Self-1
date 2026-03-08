@@ -337,8 +337,6 @@ function stopPullTimers() {
 function subscribeToTodosChanges() {
   if (!supabaseClient || !currentUser) return;
   
-  console.log("[v0] Subscribing to todos changes for user:", currentUser.id);
-  
   supabaseClient
     .channel(`todos-${currentUser.id}`)
     .on(
@@ -350,7 +348,6 @@ function subscribeToTodosChanges() {
         filter: `user_id=eq.${currentUser.id}`,
       },
       (payload) => {
-        console.log("[v0] Todos change detected:", payload.eventType);
         void loadTodosFromSupabase(true, true, true);
       }
     )
@@ -359,8 +356,6 @@ function subscribeToTodosChanges() {
 
 function subscribeToNotesChanges() {
   if (!supabaseClient || !currentUser) return;
-  
-  console.log("[v0] Subscribing to notes changes for user:", currentUser.id);
   
   supabaseClient
     .channel(`notes-${currentUser.id}`)
@@ -373,7 +368,6 @@ function subscribeToNotesChanges() {
         filter: `user_id=eq.${currentUser.id}`,
       },
       (payload) => {
-        console.log("[v0] Notes change detected:", payload.eventType);
         void loadNotesFromSupabase(true, true);
       }
     )
@@ -403,92 +397,116 @@ function renderAuthMode() {
   authPassword.autocomplete = signingIn ? "current-password" : "new-password";
 }
 
+let lastRenderTime = 0;
+let pendingRender = false;
+
 function render() {
+  // Debounce renders to prevent excessive DOM updates
+  const now = Date.now();
+  if (pendingRender || (now - lastRenderTime < 100)) {
+    pendingRender = true;
+    setTimeout(() => {
+      pendingRender = false;
+      doRender();
+    }, 100);
+    return;
+  }
+  
+  lastRenderTime = now;
+  doRender();
+}
+
+function doRender() {
   if (!currentUser) {
     list.innerHTML = "";
     renderOverdueSection();
     renderPerformance([]);
     renderShortNotes();
-    renderCalendar();
+    renderCalendarLite();
     tasksLeft.textContent = "Sign in to load your tasks";
     return;
   }
 
   generateRecurringTasksUpTo(maxDateKey(todayKey, selectedDate));
   autoShiftOverdueTasks();
-  list.innerHTML = "";
-  const dayTodos = getDayTodos();
-  const dayScopeTodos = getDayScopeTodos();
-  const filtered = getFilteredTodos(dayTodos);
-  const fragment = document.createDocumentFragment();
+  
+  // Only update list if it exists
+  if (list.parentElement) {
+    list.innerHTML = "";
+    const dayTodos = getDayTodos();
+    const dayScopeTodos = getDayScopeTodos();
+    const filtered = getFilteredTodos(dayTodos);
+    const fragment = document.createDocumentFragment();
 
-  filtered.forEach((todo) => {
-    const node = itemTemplate.content.firstElementChild.cloneNode(true);
-    node.dataset.id = todo.id;
-    node.classList.toggle("completed", todo.completed);
+    filtered.forEach((todo) => {
+      const node = itemTemplate.content.firstElementChild.cloneNode(true);
+      node.dataset.id = todo.id;
+      node.classList.toggle("completed", todo.completed);
 
-    const checkbox = node.querySelector(".todo-check");
-    const text = node.querySelector(".todo-text");
-    const level = node.querySelector(".todo-priority");
-    const time = node.querySelector(".todo-time");
-    const editBtn = node.querySelector(".edit-btn");
-    const deleteBtn = node.querySelector(".delete-btn");
+      const checkbox = node.querySelector(".todo-check");
+      const text = node.querySelector(".todo-text");
+      const level = node.querySelector(".todo-priority");
+      const time = node.querySelector(".todo-time");
+      const editBtn = node.querySelector(".edit-btn");
+      const deleteBtn = node.querySelector(".delete-btn");
 
-    checkbox.checked = todo.completed;
-    text.textContent = todo.text;
-    node.classList.toggle("shifted", Boolean(todo.shifted));
-    level.textContent = capitalize(todo.priority);
-    level.className = `todo-priority priority-${todo.priority}`;
+      checkbox.checked = todo.completed;
+      text.textContent = todo.text;
+      node.classList.toggle("shifted", Boolean(todo.shifted));
+      level.textContent = capitalize(todo.priority);
+      level.className = `todo-priority priority-${todo.priority}`;
 
-    const meta = [];
-    if (todo.shifted && todo.taskDate !== selectedDate) {
-      meta.push(`Shifted to ${formatDateLabel(todo.taskDate)}`);
-    } else if (todo.shifted && todo.shiftedFrom) {
-      meta.push(`Shifted from ${formatDateLabel(todo.shiftedFrom)}`);
+      const meta = [];
+      if (todo.shifted && todo.taskDate !== selectedDate) {
+        meta.push(`Shifted to ${formatDateLabel(todo.taskDate)}`);
+      } else if (todo.shifted && todo.shiftedFrom) {
+        meta.push(`Shifted from ${formatDateLabel(todo.shiftedFrom)}`);
+      }
+      if (todo.deadlineTime) {
+        meta.push(`Deadline: ${formatTime(todo.deadlineTime)}`);
+      }
+      time.textContent = meta.join(" | ");
+
+      checkbox.addEventListener("change", () => {
+        todo.completed = checkbox.checked;
+        saveTodos();
+        render();
+      });
+
+      editBtn.addEventListener("click", () => {
+        openTaskEditor(todo.id);
+      });
+
+      deleteBtn.addEventListener("click", () => {
+        todos = todos.filter((item) => item.id !== todo.id);
+        saveTodos();
+        render();
+      });
+
+      fragment.appendChild(node);
+    });
+
+    if (filtered.length === 0) {
+      const emptyState = document.createElement("li");
+      emptyState.className = "todo-item";
+      emptyState.textContent = `No ${currentFilter} tasks for ${formatDateLabel(selectedDate)}.`;
+      list.appendChild(emptyState);
+    } else {
+      list.appendChild(fragment);
     }
-    if (todo.deadlineTime) {
-      meta.push(`Deadline: ${formatTime(todo.deadlineTime)}`);
-    }
-    time.textContent = meta.join(" | ");
 
-    checkbox.addEventListener("change", () => {
-      todo.completed = checkbox.checked;
-      saveTodos();
-      render();
-    });
-
-    editBtn.addEventListener("click", () => {
-      openTaskEditor(todo.id);
-    });
-
-    deleteBtn.addEventListener("click", () => {
-      todos = todos.filter((item) => item.id !== todo.id);
-      saveTodos();
-      render();
-    });
-
-    fragment.appendChild(node);
-  });
-
-  if (filtered.length === 0) {
-    const emptyState = document.createElement("li");
-    emptyState.className = "todo-item";
-    emptyState.textContent = `No ${currentFilter} tasks for ${formatDateLabel(selectedDate)}.`;
-    list.appendChild(emptyState);
-  } else {
-    list.appendChild(fragment);
+    const activeCount = todos.filter(
+      (todo) =>
+        !todo.completed &&
+        (todo.taskDate === selectedDate || todo.originalDate === selectedDate)
+    ).length;
+    tasksLeft.textContent = `${activeCount} task${activeCount === 1 ? "" : "s"} left for ${formatDateLabel(selectedDate)}`;
+    renderPerformance(dayScopeTodos);
   }
-
-  const activeCount = todos.filter(
-    (todo) =>
-      !todo.completed &&
-      (todo.taskDate === selectedDate || todo.originalDate === selectedDate)
-  ).length;
-  tasksLeft.textContent = `${activeCount} task${activeCount === 1 ? "" : "s"} left for ${formatDateLabel(selectedDate)}`;
-  renderPerformance(dayScopeTodos);
+  
   renderOverdueSection();
   renderShortNotes();
-  renderCalendar();
+  renderCalendarLite();
 }
 
 function getFilteredTodos(dayTodos) {
@@ -616,68 +634,92 @@ function loadNotesLocal() {
     return {};
   }
 }
+let syncTodoTimeout = null;
+let syncRetryCount = 0;
+const MAX_SYNC_RETRIES = 3;
+
 async function syncTodosToSupabase() {
   if (!supabaseClient || !currentUser) return;
-  if (syncInFlight) {
-    syncQueued = true;
-    return;
+  
+  // Clear any pending sync timer
+  if (syncTodoTimeout) {
+    clearTimeout(syncTodoTimeout);
   }
+  
+  // Debounce sync requests
+  syncTodoTimeout = setTimeout(async () => {
+    if (syncInFlight) {
+      syncQueued = true;
+      return;
+    }
 
-  syncInFlight = true;
-  setSyncState("Sync: writing...");
-  let hadError = false;
+    syncInFlight = true;
+    setSyncState("Sync: writing...");
+    let hadError = false;
 
-  try {
-    const rows = todos.map((todo) => ({
-      id: todo.id,
-      user_id: currentUser.id,
-      text: todo.text,
-      completed: todo.completed,
-      task_date: todo.taskDate,
-      original_date: todo.originalDate,
-      shifted: todo.shifted,
-      shifted_from: todo.shiftedFrom,
-      priority: todo.priority,
-      repeat_days: todo.repeatDays,
-      series_id: todo.seriesId,
-      deadline_time: todo.deadlineTime,
-      created_at: new Date(todo.createdAt).toISOString(),
-    }));
+    try {
+      const rows = todos.map((todo) => ({
+        id: todo.id,
+        user_id: currentUser.id,
+        text: todo.text,
+        completed: todo.completed,
+        task_date: todo.taskDate,
+        original_date: todo.originalDate,
+        shifted: todo.shifted,
+        shifted_from: todo.shiftedFrom,
+        priority: todo.priority,
+        repeat_days: todo.repeatDays,
+        series_id: todo.seriesId,
+        deadline_time: todo.deadlineTime,
+        created_at: new Date(todo.createdAt).toISOString(),
+      }));
 
-    if (rows.length > 0) {
-      const { error } = await supabaseClient
-        .from("todos")
-        .upsert(rows, { onConflict: "id" });
-      if (error) {
-        hadError = true;
-        setSyncState(`Sync error: ${error.message}`);
-        console.error("Supabase sync upsert failed:", error.message);
-        return;
+      if (rows.length > 0) {
+        const { error } = await supabaseClient
+          .from("todos")
+          .upsert(rows, { onConflict: "id" });
+        if (error) {
+          hadError = true;
+          syncRetryCount++;
+          if (syncRetryCount < MAX_SYNC_RETRIES) {
+            setSyncState(`Sync: retrying (${syncRetryCount}/${MAX_SYNC_RETRIES})...`);
+            syncInFlight = false;
+            await new Promise(resolve => setTimeout(resolve, 1000 * syncRetryCount));
+            void syncTodosToSupabase();
+            return;
+          }
+          setSyncState(`Sync error: ${error.message}`);
+          console.error("Supabase sync upsert failed:", error.message);
+          syncRetryCount = 0;
+          return;
+        }
+      }
+
+      let cleanupQuery = supabaseClient.from("todos").delete().eq("user_id", currentUser.id);
+      if (rows.length > 0) {
+        cleanupQuery = cleanupQuery.not(
+          "id",
+          "in",
+          `(${rows.map((row) => `"${row.id}"`).join(",")})`
+        );
+      }
+      const { error: cleanupError } = await cleanupQuery;
+      if (cleanupError) {
+        console.warn("Supabase cleanup failed:", cleanupError.message);
+      }
+      
+      syncRetryCount = 0;
+    } finally {
+      syncInFlight = false;
+      if (!hadError) {
+        setSyncState("Sync: up to date");
+      }
+      if (syncQueued) {
+        syncQueued = false;
+        void syncTodosToSupabase();
       }
     }
-
-    let cleanupQuery = supabaseClient.from("todos").delete().eq("user_id", currentUser.id);
-    if (rows.length > 0) {
-      cleanupQuery = cleanupQuery.not(
-        "id",
-        "in",
-        `(${rows.map((row) => `"${row.id}"`).join(",")})`
-      );
-    }
-    const { error: cleanupError } = await cleanupQuery;
-    if (cleanupError) {
-      console.warn("Supabase cleanup failed:", cleanupError.message);
-    }
-  } finally {
-    syncInFlight = false;
-    if (!hadError) {
-      setSyncState("Sync: up to date");
-    }
-    if (syncQueued) {
-      syncQueued = false;
-      void syncTodosToSupabase();
-    }
-  }
+  }, 500);
 }
 
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false, forceRender = false) {
@@ -824,9 +866,20 @@ function normalizeTodo(item) {
   };
 }
 
-function renderCalendar() {
-  calendarGrid.innerHTML = "";
+let cachedTaskDates = null;
+let lastTaskDatesCacheTime = 0;
 
+function renderCalendarLite() {
+  // Only recalculate if enough time passed or task dates changed
+  const now = Date.now();
+  if (!cachedTaskDates || (now - lastTaskDatesCacheTime > 5000)) {
+    cachedTaskDates = new Set(todos.map((todo) => todo.taskDate));
+    lastTaskDatesCacheTime = now;
+  }
+  
+  const taskDates = cachedTaskDates;
+  
+  // Update only the calendar title and days that changed
   const year = calendarViewDate.getFullYear();
   const month = calendarViewDate.getMonth();
   const firstDay = new Date(year, month, 1);
@@ -834,56 +887,69 @@ function renderCalendar() {
   const offset = (firstDay.getDay() + 6) % 7;
   const weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const today = new Date();
-  const taskDates = new Set(todos.map((todo) => todo.taskDate));
+  
   calendarTitle.textContent = `${firstDay.toLocaleString(undefined, { month: "long" })} ${year}`;
+  
+  // Only rebuild if month changed
+  if (calendarGrid.children.length === 0 || calendarGrid.dataset.month !== `${year}-${month}`) {
+    calendarGrid.innerHTML = "";
+    calendarGrid.dataset.month = `${year}-${month}`;
+    
+    weekdays.forEach((dayName) => {
+      const label = document.createElement("div");
+      label.className = "weekday";
+      label.textContent = dayName;
+      calendarGrid.appendChild(label);
+    });
 
-  weekdays.forEach((dayName) => {
-    const label = document.createElement("div");
-    label.className = "weekday";
-    label.textContent = dayName;
-    calendarGrid.appendChild(label);
-  });
-
-  for (let i = 0; i < offset; i += 1) {
-    const spacer = document.createElement("div");
-    spacer.className = "day empty";
-    calendarGrid.appendChild(spacer);
-  }
-
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const date = new Date(year, month, day);
-    const yyyyMmDd = toYyyyMmDd(date);
-    const cell = document.createElement("div");
-    cell.className = "day";
-    cell.textContent = String(day);
-    cell.setAttribute("role", "button");
-    cell.setAttribute("tabindex", "0");
-
-    if (taskDates.has(yyyyMmDd)) cell.classList.add("has-task");
-    if (yyyyMmDd === selectedDate) cell.classList.add("selected");
-    const todayKeyLocal = toYyyyMmDd(today);
-    if (yyyyMmDd < todayKeyLocal) {
-      cell.classList.add("past");
-    } else if (yyyyMmDd === todayKeyLocal) {
-      cell.classList.add("today");
-    } else {
-      cell.classList.add("future");
+    for (let i = 0; i < offset; i += 1) {
+      const spacer = document.createElement("div");
+      spacer.className = "day empty";
+      calendarGrid.appendChild(spacer);
     }
 
-    cell.addEventListener("click", () => {
-      selectedDate = yyyyMmDd;
-      render();
-    });
+    for (let day = 1; day <= daysInMonth; day += 1) {
+      const date = new Date(year, month, day);
+      const yyyyMmDd = toYyyyMmDd(date);
+      const cell = document.createElement("div");
+      cell.className = "day";
+      cell.textContent = String(day);
+      cell.dataset.date = yyyyMmDd;
+      cell.setAttribute("role", "button");
+      cell.setAttribute("tabindex", "0");
 
-    cell.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      selectedDate = yyyyMmDd;
-      render();
-    });
+      cell.addEventListener("click", () => {
+        selectedDate = yyyyMmDd;
+        render();
+      });
 
-    calendarGrid.appendChild(cell);
+      cell.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        selectedDate = yyyyMmDd;
+        render();
+      });
+
+      calendarGrid.appendChild(cell);
+    }
   }
+  
+  // Update styles for existing cells
+  const todayKeyLocal = toYyyyMmDd(today);
+  const dayCells = calendarGrid.querySelectorAll(".day[data-date]");
+  dayCells.forEach((cell) => {
+    const yyyyMmDd = cell.dataset.date;
+    cell.classList.toggle("has-task", taskDates.has(yyyyMmDd));
+    cell.classList.toggle("selected", yyyyMmDd === selectedDate);
+    cell.classList.toggle("past", yyyyMmDd < todayKeyLocal);
+    cell.classList.toggle("today", yyyyMmDd === todayKeyLocal);
+    cell.classList.toggle("future", yyyyMmDd > todayKeyLocal);
+  });
+}
+
+function renderCalendar() {
+  // Alias for backward compatibility
+  renderCalendarLite();
 }
 
 function getPendingTodosForSelectedDate() {
