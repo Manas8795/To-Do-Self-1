@@ -207,30 +207,49 @@ function bindUiEvents() {
 }
 
 async function initSupabase() {
+  // Wait for Supabase library to load
+  let retries = 0;
+  while (!window.supabase?.createClient && retries < 50) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    retries++;
+  }
+
   if (!window.supabase?.createClient || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
     setSyncState("Sync: Supabase not configured");
-    setAuthMessage("Supabase is not configured.", true);
+    setAuthMessage("Supabase failed to load. Please refresh the page.", true);
     return;
   }
 
-  supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  try {
+    supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    setSyncState("Sync: initializing...");
 
-  const {
-    data: { session },
-    error,
-  } = await supabaseClient.auth.getSession();
+    const {
+      data: { session },
+      error,
+    } = await supabaseClient.auth.getSession();
 
-  if (error) {
-    setAuthMessage(error.message, true);
-    setSyncState(`Sync error: ${error.message}`);
+    if (error) {
+      console.error("Auth error:", error);
+      setSyncState(`Sync: ready`);
+    } else {
+      setSyncState("Sync: ready");
+    }
+
+    supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
+      void applySession(nextSession);
+    });
+
+    authReady = true;
+    if (session) {
+      await applySession(session);
+    } else {
+      setAuthMessage("Ready to sign in.");
+    }
+  } catch (err) {
+    console.error("Supabase init error:", err);
+    setAuthMessage("Failed to initialize Supabase. Please refresh.", true);
   }
-
-  supabaseClient.auth.onAuthStateChange((_event, nextSession) => {
-    void applySession(nextSession);
-  });
-
-  authReady = true;
-  await applySession(session);
 }
 
 async function submitAuthForm() {
@@ -355,8 +374,6 @@ function stopPullTimers() {
   }
 }
 
-let lastSyncTime = 0;
-
 function subscribeToTodosChanges() {
   if (!supabaseClient || !currentUser) return;
   
@@ -370,13 +387,9 @@ function subscribeToTodosChanges() {
         table: "todos",
         filter: `user_id=eq.${currentUser.id}`,
       },
-      (payload) => {
-        // Debounce real-time updates to prevent thrashing
-        const now = Date.now();
-        if (now - lastSyncTime > 1000) {
-          lastSyncTime = now;
-          void loadTodosFromSupabase(true, true, true);
-        }
+      () => {
+        // Refresh data on external changes
+        void loadTodosFromSupabase(true, true);
       }
     )
     .subscribe();
@@ -395,7 +408,7 @@ function subscribeToNotesChanges() {
         table: "day_notes",
         filter: `user_id=eq.${currentUser.id}`,
       },
-      (payload) => {
+      () => {
         void loadNotesFromSupabase(true, true);
       }
     )
@@ -425,23 +438,17 @@ function renderAuthMode() {
   authPassword.autocomplete = signingIn ? "current-password" : "new-password";
 }
 
-let lastRenderTime = 0;
 let pendingRender = false;
 
 function render() {
-  // Debounce renders to prevent excessive DOM updates
-  const now = Date.now();
-  if (pendingRender || (now - lastRenderTime < 100)) {
-    pendingRender = true;
-    setTimeout(() => {
-      pendingRender = false;
-      doRender();
-    }, 100);
-    return;
-  }
+  // Debounce renders slightly to batch multiple changes
+  if (pendingRender) return;
   
-  lastRenderTime = now;
-  doRender();
+  pendingRender = true;
+  setTimeout(() => {
+    pendingRender = false;
+    doRender();
+  }, 16); // One frame (60fps)
 }
 
 function doRender() {
@@ -664,8 +671,6 @@ function loadNotesLocal() {
   }
 }
 let syncTodoTimeout = null;
-let syncRetryCount = 0;
-const MAX_SYNC_RETRIES = 3;
 
 async function syncTodosToSupabase() {
   if (!supabaseClient || !currentUser) return;
@@ -675,7 +680,7 @@ async function syncTodosToSupabase() {
     clearTimeout(syncTodoTimeout);
   }
   
-  // Debounce sync requests
+  // Debounce sync requests - wait 300ms after last change
   syncTodoTimeout = setTimeout(async () => {
     if (syncInFlight) {
       syncQueued = true;
@@ -684,7 +689,6 @@ async function syncTodosToSupabase() {
 
     syncInFlight = true;
     setSyncState("Sync: writing...");
-    let hadError = false;
 
     try {
       const rows = todos.map((todo) => ({
@@ -703,93 +707,80 @@ async function syncTodosToSupabase() {
         created_at: new Date(todo.createdAt).toISOString(),
       }));
 
+      // Delete all old todos then insert new ones (simpler, less prone to conflicts)
+      await supabaseClient
+        .from("todos")
+        .delete()
+        .eq("user_id", currentUser.id);
+
       if (rows.length > 0) {
         const { error } = await supabaseClient
           .from("todos")
-          .upsert(rows, { onConflict: "id" });
+          .insert(rows);
+        
         if (error) {
-          hadError = true;
-          syncRetryCount++;
-          if (syncRetryCount < MAX_SYNC_RETRIES) {
-            setSyncState(`Sync: retrying (${syncRetryCount}/${MAX_SYNC_RETRIES})...`);
-            syncInFlight = false;
-            await new Promise(resolve => setTimeout(resolve, 1000 * syncRetryCount));
-            void syncTodosToSupabase();
-            return;
-          }
           setSyncState(`Sync error: ${error.message}`);
-          console.error("Supabase sync upsert failed:", error.message);
-          syncRetryCount = 0;
+          console.error("Sync failed:", error.message);
+          syncInFlight = false;
+          if (syncQueued) {
+            syncQueued = false;
+            void syncTodosToSupabase();
+          }
           return;
         }
       }
 
-      let cleanupQuery = supabaseClient.from("todos").delete().eq("user_id", currentUser.id);
-      if (rows.length > 0) {
-        cleanupQuery = cleanupQuery.not(
-          "id",
-          "in",
-          `(${rows.map((row) => `"${row.id}"`).join(",")})`
-        );
-      }
-      const { error: cleanupError } = await cleanupQuery;
-      if (cleanupError) {
-        console.warn("Supabase cleanup failed:", cleanupError.message);
-      }
-      
-      syncRetryCount = 0;
+      setSyncState("Sync: up to date");
+    } catch (err) {
+      setSyncState("Sync: error");
+      console.error("Sync error:", err);
     } finally {
       syncInFlight = false;
-      if (!hadError) {
-        setSyncState("Sync: up to date");
-      }
       if (syncQueued) {
         syncQueued = false;
         void syncTodosToSupabase();
       }
     }
-  }, 500);
+  }, 300);
 }
 
-async function loadTodosFromSupabase(overwriteLocal = true, quiet = false, forceRender = false) {
+async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   if (!supabaseClient || !currentUser) return;
   if (syncInFlight) return;
+  
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
 
-  const { data, error } = await supabaseClient
-    .from("todos")
-    .select("*")
-    .eq("user_id", currentUser.id)
-    .order("created_at", { ascending: false });
+  try {
+    const { data, error } = await supabaseClient
+      .from("todos")
+      .select("*")
+      .eq("user_id", currentUser.id)
+      .order("created_at", { ascending: false });
 
-  if (error) {
-    setSyncState(`Sync error: ${error.message}`);
-    console.error("Supabase load failed:", error.message);
-    return;
-  }
+    if (error) {
+      setSyncState(`Sync error: ${error.message}`);
+      return;
+    }
 
-  const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
-  
-  // Don't overwrite if local changes are very recent (within 2 seconds)
-  const hasRecentLocalChanges = localChangesTimestamp && (Date.now() - localChangesTimestamp < 2000);
-  
-  if (!forceRender && !overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
+    const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
+    
+    // Only update if data actually changed
+    if (isSameTodoSet(todos, cloudTodos)) {
+      setSyncState("Sync: up to date");
+      return;
+    }
+
+    todos = cloudTodos;
+    saveTodosLocal();
+    autoShiftOverdueTasks();
+    render();
     setSyncState("Sync: up to date");
-    return;
+  } catch (err) {
+    setSyncState("Sync: error");
+    console.error("Load error:", err);
   }
-  
-  if (hasRecentLocalChanges && !forceRender) {
-    setSyncState("Sync: local changes pending...");
-    return;
-  }
-
-  todos = cloudTodos;
-  saveTodosLocal();
-  autoShiftOverdueTasks();
-  render();
-  setSyncState("Sync: up to date");
 }
 
 async function syncNotesToSupabase() {
