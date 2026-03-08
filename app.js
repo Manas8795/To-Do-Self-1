@@ -310,12 +310,17 @@ async function applySession(session) {
   await loadTodosFromSupabase(true, false);
   await loadNotesFromSupabase(true, false);
 
+  // Subscribe to real-time changes
+  subscribeToTodosChanges();
+  subscribeToNotesChanges();
+
+  // Keep polling as fallback (every 30 seconds)
   pullTimer = setInterval(() => {
     void loadTodosFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
   notesPullTimer = setInterval(() => {
     void loadNotesFromSupabase(false, true);
-  }, 15000);
+  }, 30000);
 }
 
 function stopPullTimers() {
@@ -327,6 +332,52 @@ function stopPullTimers() {
     clearInterval(notesPullTimer);
     notesPullTimer = null;
   }
+}
+
+function subscribeToTodosChanges() {
+  if (!supabaseClient || !currentUser) return;
+  
+  console.log("[v0] Subscribing to todos changes for user:", currentUser.id);
+  
+  supabaseClient
+    .channel(`todos-${currentUser.id}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "todos",
+        filter: `user_id=eq.${currentUser.id}`,
+      },
+      (payload) => {
+        console.log("[v0] Todos change detected:", payload.eventType);
+        void loadTodosFromSupabase(true, true, true);
+      }
+    )
+    .subscribe();
+}
+
+function subscribeToNotesChanges() {
+  if (!supabaseClient || !currentUser) return;
+  
+  console.log("[v0] Subscribing to notes changes for user:", currentUser.id);
+  
+  supabaseClient
+    .channel(`notes-${currentUser.id}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: "day_notes",
+        filter: `user_id=eq.${currentUser.id}`,
+      },
+      (payload) => {
+        console.log("[v0] Notes change detected:", payload.eventType);
+        void loadNotesFromSupabase(true, true);
+      }
+    )
+    .subscribe();
 }
 
 function renderShell() {
@@ -629,7 +680,7 @@ async function syncTodosToSupabase() {
   }
 }
 
-async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
+async function loadTodosFromSupabase(overwriteLocal = true, quiet = false, forceRender = false) {
   if (!supabaseClient || !currentUser) return;
   if (syncInFlight) return;
   if (!quiet) {
@@ -649,7 +700,7 @@ async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   }
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
-  if (!overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
+  if (!forceRender && !overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
     setSyncState("Sync: up to date");
     return;
   }
