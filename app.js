@@ -53,7 +53,6 @@ const userPanel = document.getElementById("user-panel");
 const signOutBtn = document.getElementById("sign-out");
 
 const THEME_KEY = "todo-app-theme-v1";
-const todayKey = toYyyyMmDd(new Date());
 const WEEKDAY_REPEAT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday"];
 
 const SUPABASE_URL = "https://hxgakjlurfydttwqdeke.supabase.co";
@@ -62,7 +61,7 @@ const SUPABASE_ANON_KEY = "sb_publishable_-rJ_1mH7oPlOWw_30156wg_3xUW91uV";
 let todos = [];
 let currentFilter = "pending";
 let calendarViewDate = new Date();
-let selectedDate = todayKey;
+let selectedDate = getTodayKey();
 let supabaseClient = null;
 let pullTimer = null;
 let notesPullTimer = null;
@@ -116,6 +115,9 @@ function bindUiEvents() {
 
   clearCompletedBtn.addEventListener("click", () => {
     if (!currentUser) return;
+    const completedIds = todos
+      .filter((todo) => todo.taskDate === selectedDate && todo.completed)
+      .map((todo) => todo.id);
     const hasCompleted = todos.some(
       (todo) => todo.taskDate === selectedDate && todo.completed
     );
@@ -125,6 +127,7 @@ function bindUiEvents() {
       (todo) => !(todo.taskDate === selectedDate && todo.completed)
     );
     saveTodos();
+    void deleteTodosFromSupabase(completedIds);
     render();
   });
 
@@ -296,7 +299,7 @@ async function applySession(session) {
 
   todos = loadTodosLocal();
   dayNotes = loadNotesLocal();
-  selectedDate = todayKey;
+  selectedDate = getTodayKey();
   calendarViewDate = new Date();
   currentFilter = "pending";
   filterButtons.forEach((btn) => {
@@ -363,7 +366,7 @@ function render() {
     return;
   }
 
-  generateRecurringTasksUpTo(maxDateKey(todayKey, selectedDate));
+  generateRecurringTasksUpTo(maxDateKey(getTodayKey(), selectedDate));
   autoShiftOverdueTasks();
   list.innerHTML = "";
   const dayTodos = getDayTodos();
@@ -411,8 +414,10 @@ function render() {
     });
 
     deleteBtn.addEventListener("click", () => {
+      const deletedId = todo.id;
       todos = todos.filter((item) => item.id !== todo.id);
       saveTodos();
+      void deleteTodosFromSupabase([deletedId]);
       render();
     });
 
@@ -604,19 +609,6 @@ async function syncTodosToSupabase() {
         return;
       }
     }
-
-    let cleanupQuery = supabaseClient.from("todos").delete().eq("user_id", currentUser.id);
-    if (rows.length > 0) {
-      cleanupQuery = cleanupQuery.not(
-        "id",
-        "in",
-        `(${rows.map((row) => `"${row.id}"`).join(",")})`
-      );
-    }
-    const { error: cleanupError } = await cleanupQuery;
-    if (cleanupError) {
-      console.warn("Supabase cleanup failed:", cleanupError.message);
-    }
   } finally {
     syncInFlight = false;
     if (!hadError) {
@@ -627,6 +619,24 @@ async function syncTodosToSupabase() {
       void syncTodosToSupabase();
     }
   }
+}
+
+async function deleteTodosFromSupabase(ids) {
+  if (!supabaseClient || !currentUser || ids.length === 0) return;
+
+  const { error } = await supabaseClient
+    .from("todos")
+    .delete()
+    .eq("user_id", currentUser.id)
+    .in("id", ids);
+
+  if (error) {
+    setSyncState(`Delete sync error: ${error.message}`);
+    console.error("Supabase delete failed:", error.message);
+    return;
+  }
+
+  setSyncState("Sync: up to date");
 }
 
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
@@ -685,20 +695,25 @@ async function syncNotesToSupabase() {
     }
   }
 
-  let cleanupQuery = supabaseClient.from("day_notes").delete().eq("user_id", currentUser.id);
-  if (rows.length > 0) {
-    cleanupQuery = cleanupQuery.not(
-      "note_date",
-      "in",
-      `(${rows.map((row) => `"${row.note_date}"`).join(",")})`
-    );
-  }
-  const { error: cleanupError } = await cleanupQuery;
-  if (cleanupError) {
-    console.warn("Supabase note cleanup failed:", cleanupError.message);
+  setSyncState("Sync: note saved");
+}
+
+async function deleteNoteFromSupabase(noteDate) {
+  if (!supabaseClient || !currentUser || !isDateKey(noteDate)) return;
+
+  const { error } = await supabaseClient
+    .from("day_notes")
+    .delete()
+    .eq("user_id", currentUser.id)
+    .eq("note_date", noteDate);
+
+  if (error) {
+    setSyncState(`Note delete error: ${error.message}`);
+    console.error("Supabase note delete failed:", error.message);
+    return;
   }
 
-  setSyncState("Sync: note saved");
+  setSyncState("Sync: up to date");
 }
 
 async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
@@ -883,17 +898,24 @@ function renderShortNotes() {
 
 function saveCurrentNote() {
   if (!currentUser) return;
-  dayNotes[selectedDate] = notesInput.value;
+  const nextNote = notesInput.value;
+  if (nextNote.trim()) {
+    dayNotes[selectedDate] = nextNote;
+  } else {
+    delete dayNotes[selectedDate];
+  }
   saveNotesLocal();
-  if (supabaseClient) {
+  if (supabaseClient && nextNote.trim()) {
     void syncNotesToSupabase();
+  } else if (supabaseClient) {
+    void deleteNoteFromSupabase(selectedDate);
   } else {
     setSyncState("Sync: note saved locally");
   }
 }
 
 function renderPerformance(dayTodos) {
-  const overallScopeTodos = todos.filter((todo) => todo.originalDate <= todayKey);
+  const overallScopeTodos = todos.filter((todo) => todo.originalDate <= getTodayKey());
   const completed = dayTodos.filter((todo) => todo.completed).length;
   const pending = dayTodos.filter((todo) => !todo.completed && !todo.shifted).length;
   const shifted = dayTodos.filter(
@@ -1029,7 +1051,7 @@ function normalizeTaskDate(item) {
   if (isDateKey(raw)) return raw;
   if (typeof item.createdAt === "number") return toYyyyMmDd(new Date(item.createdAt));
   if (typeof item.created_at === "string") return toYyyyMmDd(new Date(item.created_at));
-  return todayKey;
+  return getTodayKey();
 }
 
 function normalizeOriginalDate(item) {
@@ -1098,6 +1120,10 @@ function toYyyyMmDd(date) {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function getTodayKey() {
+  return toYyyyMmDd(new Date());
 }
 
 function formatDateLabel(yyyyMmDd) {
