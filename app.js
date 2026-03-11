@@ -73,6 +73,7 @@ let dayNotes = {};
 let currentUser = null;
 let authMode = "signin";
 let authReady = false;
+let isHydrating = false;
 
 initTheme();
 bindUiEvents();
@@ -278,6 +279,7 @@ async function applySession(session) {
 
   currentUser = session?.user ?? null;
   if (!currentUser) {
+    isHydrating = false;
     todos = [];
     dayNotes = {};
     renderShell();
@@ -288,8 +290,8 @@ async function applySession(session) {
     return;
   }
 
-  todos = loadTodosLocal();
-  dayNotes = loadNotesLocal();
+  const localTodos = loadTodosLocal();
+  const localNotes = loadNotesLocal();
   selectedDate = getTodayKey();
   calendarViewDate = new Date();
   currentFilter = "pending";
@@ -297,12 +299,24 @@ async function applySession(session) {
     btn.classList.toggle("active", btn.dataset.filter === currentFilter);
   });
 
+  todos = [];
+  dayNotes = {};
+  isHydrating = true;
   renderShell();
-  render();
   setSyncState("Sync: loading...");
 
-  await loadTodosFromSupabase(true, false);
-  await loadNotesFromSupabase(true, false);
+  const todosLoaded = await loadTodosFromSupabase(true, false);
+  const notesLoaded = await loadNotesFromSupabase(true, false);
+
+  if (!todosLoaded) {
+    todos = localTodos;
+  }
+  if (!notesLoaded) {
+    dayNotes = localNotes;
+  }
+
+  isHydrating = false;
+  render();
 
   pullTimer = setInterval(() => {
     void loadTodosFromSupabase(false, true);
@@ -642,8 +656,8 @@ async function permanentlyDeleteTodos(ids) {
 }
 
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
-  if (!supabaseClient || !currentUser) return;
-  if (syncInFlight) return;
+  if (!supabaseClient || !currentUser) return false;
+  if (syncInFlight) return false;
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
@@ -657,20 +671,23 @@ async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
   if (error) {
     setSyncState(`Sync error: ${error.message}`);
     console.error("Supabase load failed:", error.message);
-    return;
+    return false;
   }
 
   const cloudTodos = (data ?? []).map((row) => normalizeTodo(row));
   if (!overwriteLocal && isSameTodoSet(todos, cloudTodos)) {
     setSyncState("Sync: up to date");
-    return;
+    return true;
   }
 
   todos = cloudTodos;
   saveTodosLocal();
-  autoShiftOverdueTasks();
-  render();
+  if (!isHydrating) {
+    autoShiftOverdueTasks();
+    render();
+  }
   setSyncState("Sync: up to date");
+  return true;
 }
 
 async function syncNotesToSupabase() {
@@ -719,7 +736,7 @@ async function deleteNoteFromSupabase(noteDate) {
 }
 
 async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
-  if (!supabaseClient || !currentUser) return;
+  if (!supabaseClient || !currentUser) return false;
   if (!quiet) {
     setSyncState("Sync: loading...");
   }
@@ -733,7 +750,7 @@ async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
   if (error) {
     setSyncState(`Note load error: ${error.message}`);
     console.error("Supabase notes load failed:", error.message);
-    return;
+    return false;
   }
 
   const cloudNotes = Object.fromEntries(
@@ -743,12 +760,15 @@ async function loadNotesFromSupabase(overwriteLocal = true, quiet = false) {
   );
 
   if (!overwriteLocal && isSameNotesMap(dayNotes, cloudNotes)) {
-    return;
+    return true;
   }
 
   dayNotes = cloudNotes;
   saveNotesLocal();
-  renderShortNotes();
+  if (!isHydrating) {
+    renderShortNotes();
+  }
+  return true;
 }
 
 function loadTodosLocal() {
@@ -1259,3 +1279,8 @@ async function handleInstallClick() {
   deferredInstallPrompt = null;
   installAppBtn.hidden = true;
 }
+
+
+
+
+
