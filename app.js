@@ -118,17 +118,8 @@ function bindUiEvents() {
     const completedIds = todos
       .filter((todo) => todo.taskDate === selectedDate && todo.completed)
       .map((todo) => todo.id);
-    const hasCompleted = todos.some(
-      (todo) => todo.taskDate === selectedDate && todo.completed
-    );
-    if (!hasCompleted) return;
-
-    todos = todos.filter(
-      (todo) => !(todo.taskDate === selectedDate && todo.completed)
-    );
-    saveTodos();
-    void deleteTodosFromSupabase(completedIds);
-    render();
+    if (completedIds.length === 0) return;
+    void permanentlyDeleteTodos(completedIds);
   });
 
   filterButtons.forEach((button) => {
@@ -414,11 +405,7 @@ function render() {
     });
 
     deleteBtn.addEventListener("click", () => {
-      const deletedId = todo.id;
-      todos = todos.filter((item) => item.id !== todo.id);
-      saveTodos();
-      void deleteTodosFromSupabase([deletedId]);
-      render();
+      void permanentlyDeleteTodos([todo.id]);
     });
 
     fragment.appendChild(node);
@@ -622,8 +609,9 @@ async function syncTodosToSupabase() {
 }
 
 async function deleteTodosFromSupabase(ids) {
-  if (!supabaseClient || !currentUser || ids.length === 0) return;
+  if (!supabaseClient || !currentUser || ids.length === 0) return true;
 
+  setSyncState("Sync: deleting...");
   const { error } = await supabaseClient
     .from("todos")
     .delete()
@@ -633,10 +621,24 @@ async function deleteTodosFromSupabase(ids) {
   if (error) {
     setSyncState(`Delete sync error: ${error.message}`);
     console.error("Supabase delete failed:", error.message);
-    return;
+    return false;
   }
 
   setSyncState("Sync: up to date");
+  return true;
+}
+
+async function permanentlyDeleteTodos(ids) {
+  if (ids.length === 0) return;
+
+  const deleteFailed = await deleteTodosFromSupabase(ids);
+  if (deleteFailed === false) {
+    return;
+  }
+
+  todos = todos.filter((todo) => !ids.includes(todo.id));
+  saveTodos();
+  render();
 }
 
 async function loadTodosFromSupabase(overwriteLocal = true, quiet = false) {
